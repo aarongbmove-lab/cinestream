@@ -1,5 +1,14 @@
 name: iOS Build
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # Adds support for Node.js 24
+
+jobs:
+  build:
+    runs-on: macos-latest
+    # ... the rest of your workflow ...
+
+
 on:
   workflow_dispatch:
     inputs:
