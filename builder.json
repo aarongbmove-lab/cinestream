@@ -1,0 +1,17 @@
+{
+  "project": "cinestream",
+  "platform": "ios",
+  "github": {
+    "owner": "aarongbmove-lab",
+    "repo": "cinestream"
+  },
+  "ios": {
+    "path": "ios"
+  },
+  "flutter": {
+    "version": "3.41.6",
+    "watch": {}
+  },
+  "reactNative": {},
+  "mobai": {}
+}
