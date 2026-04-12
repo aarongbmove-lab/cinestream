@@ -59,22 +59,27 @@ jobs:
       - name: Detect project type
         id: detect
         run: |
+          IOS_PATH="${{ inputs.ios_path }}"
           if [ -f "pubspec.yaml" ]; then
             echo "type=flutter" >> $GITHUB_OUTPUT
+            [ "$IOS_PATH" = "." ] && IOS_PATH="ios"
           elif [ -f "package.json" ] && grep -q '"expo"' package.json; then
             echo "type=expo" >> $GITHUB_OUTPUT
+            [ "$IOS_PATH" = "." ] && IOS_PATH="ios"
           elif [ -f "package.json" ] && grep -q '"react-native"' package.json; then
             echo "type=reactnative" >> $GITHUB_OUTPUT
+            [ "$IOS_PATH" = "." ] && IOS_PATH="ios"
           else
             echo "type=native" >> $GITHUB_OUTPUT
           fi
+          echo "ios_path=$IOS_PATH" >> $GITHUB_OUTPUT
 
       - name: Setup Flutter
         if: steps.detect.outputs.type == 'flutter'
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: ${{ inputs.flutter_version || '' }}
-          channel: ${{ inputs.flutter_version && 'stable' || 'stable' }}
+          flutter-version: ${{ (inputs.flutter_version == 'y' || inputs.flutter_version == 'Y') && '' || inputs.flutter_version }}
+          channel: stable
           cache: true
 
       - name: Flutter pub get
@@ -106,9 +111,9 @@ jobs:
         id: pods-cache
         with:
           path: |
-            ${{ inputs.ios_path }}/Pods
+            ${{ steps.detect.outputs.ios_path }}/Pods
             ~/.cocoapods/repos
-          key: pods-${{ runner.os }}-${{ hashFiles(format('{0}/Podfile.lock', inputs.ios_path)) }}
+          key: pods-${{ runner.os }}-${{ hashFiles(format('{0}/Podfile.lock', steps.detect.outputs.ios_path)) }}
           restore-keys: |
             pods-${{ runner.os }}-
 
@@ -150,7 +155,7 @@ jobs:
       - name: Build IPA
         env:
           BUILD_ID: ${{ inputs.build_id }}
-          IOS_PATH: ${{ inputs.ios_path }}
+          IOS_PATH: ${{ steps.detect.outputs.ios_path }}
           SCHEME: ${{ inputs.scheme }}
           PROJECT_TYPE: ${{ steps.detect.outputs.type }}
           USE_SIGNING: ${{ inputs.use_signing }}
@@ -187,6 +192,7 @@ jobs:
 
           # Use custom DerivedData path for caching
           DERIVED_DATA_PATH="${GITHUB_WORKSPACE}/DerivedData"
+          mkdir -p "$DERIVED_DATA_PATH"
 
           if [ "$PROJECT_TYPE" = "flutter" ]; then
             cd ..
