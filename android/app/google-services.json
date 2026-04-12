@@ -1,0 +1,54 @@
+{
+  "project_info": {
+    "project_number": "651005734001",
+    "project_id": "cinestream-auth",
+    "storage_bucket": "cinestream-auth.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:651005734001:android:36d4cb61adcc9f43cebfd0",
+        "android_client_info": {
+          "package_name": "com.example.cinestream"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "651005734001-kqtc1cmnrgd7fec6n793ltf3k6bsto6f.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.cinestream",
+            "certificate_hash": "ef3e35d80d22719fde3f50b882cd5676592b93cc"
+          }
+        },
+        {
+          "client_id": "651005734001-31jgmhdpdd341ah0nsnfjlb9n98rrvsn.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDayfVo4x7mFUGNQv-_ht2yKyHAViM5ZwY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "651005734001-31jgmhdpdd341ah0nsnfjlb9n98rrvsn.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "651005734001-o201k2d26ipl972nasmv0vgjfpkr23uj.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.cinestream"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
