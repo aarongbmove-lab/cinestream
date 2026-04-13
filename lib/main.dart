@@ -10,6 +10,8 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:webview_win_floating/webview_win_floating.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+// ignore: depend_on_referenced_packages, unnecessary_import
+import 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart';
 import 'package:youtube_player_iframe/youtube_player_iframe.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -41,12 +43,56 @@ Future<dynamic> fetchWithCache(String url) async {
   }
 }
 
-bool _isReleased(dynamic item) {
+bool _isReleased(dynamic item, {bool strictFilter = false}) {
   if (item is! Map) return false;
+  
+  // Filter out explicit adult content globally
+  if (item['adult'] == true || item['adult'] == 'true') {
+    return false;
+  }
+
+  if (strictFilter) {
+    // Hide documentaries (Genre ID 99) from general browsing/home pages
+    if (item['genre_ids'] is List && (item['genre_ids'] as List).contains(99)) {
+      return false;
+    }
+
+    final originalLanguage = item['original_language']?.toString();
+    if (originalLanguage != null && originalLanguage != 'en') {
+      final originCountry = item['origin_country'];
+      bool isUS = false;
+      if (originCountry is List) {
+        isUS = originCountry.contains('US');
+      } else if (originCountry is String) {
+        isUS = originCountry == 'US';
+      }
+      if (!isUS) {
+        final voteCount = (item['vote_count'] as num?)?.toInt() ?? 0;
+        final popularity = (item['popularity'] as num?)?.toDouble() ?? 0.0;
+        if (voteCount < 200 && popularity < 50.0) {
+          return false;
+        }
+      }
+    }
+  }
+
+  final voteAverageRaw = item['vote_average'];
+  if (voteAverageRaw != null) {
+    final voteAverage = double.tryParse(voteAverageRaw.toString()) ?? 0.0;
+    if (voteAverage == 0.0) return false;
+  }
+
   final mediaType = item['media_type'];
   final isMovie = mediaType == 'movie' || (mediaType == null && item.containsKey('title') && item.containsKey('release_date'));
   
   if (isMovie) {
+    // Filter out short films (< 20 mins) if runtime data is present
+    final runtimeRaw = item['runtime'];
+    if (runtimeRaw != null) {
+      final runtime = double.tryParse(runtimeRaw.toString()) ?? 0.0;
+      if (runtime > 0 && runtime < 20) return false;
+    }
+
     final releaseDateStr = item['release_date']?.toString();
     if (releaseDateStr == null || releaseDateStr.trim().isEmpty) return false;
     try {
@@ -667,8 +713,8 @@ class _SearchBodyState extends State<SearchBody> {
                   ? const Center(child: Text('No results found.', style: TextStyle(color: Colors.white54)))
                   : GridView.builder(
                       padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: 3,
+                      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                        maxCrossAxisExtent: 160.0,
                         childAspectRatio: 2 / 3,
                         crossAxisSpacing: 12.0,
                         mainAxisSpacing: 12.0,
@@ -739,7 +785,7 @@ class _TMDBHomePageState extends State<TMDBHomePage> {
       if (mounted) {
         setState(() {
           final rawList = data['results'] as List? ?? [];
-          mediaList = rawList.where((item) => _isReleased(item)).toList();
+          mediaList = rawList.where((item) => _isReleased(item, strictFilter: true)).toList();
           isLoading = false;
         });
       }
@@ -810,12 +856,58 @@ class ProfileBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return SafeArea(
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 16.0, right: 24.0, left: 24.0),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'My Stuff',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.settings, color: Colors.white, size: 28),
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (context) => const SettingsPage()),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+          const Expanded(
+            child: Center(
+              child: Text(
+                'Your saved items will appear here.',
+                style: TextStyle(color: Colors.white54, fontSize: 16),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class SettingsPage extends StatelessWidget {
+  const SettingsPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
     
     ImageProvider? profileImage;
     if (user?.photoURL != null) {
       if (user!.photoURL!.startsWith('data:image')) {
-        // Decode the Base64 string we saved from Microsoft Graph
         final base64String = user.photoURL!.split(',').last;
         profileImage = MemoryImage(base64Decode(base64String));
       } else {
@@ -823,60 +915,71 @@ class ProfileBody extends StatelessWidget {
       }
     }
 
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          if (profileImage != null)
-            CircleAvatar(
-              radius: 50,
-              backgroundImage: profileImage,
-            )
-          else
-            const CircleAvatar(
-              radius: 50,
-              backgroundColor: Colors.white24,
-              child: Icon(Icons.person, size: 50, color: Colors.white),
-            ),
-          const SizedBox(height: 16),
-          Text(
-            (user?.displayName != null && user!.displayName!.isNotEmpty) 
-                ? user.displayName! 
-                : 'My Stuff',
-            style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
-          ),
-          if (user?.email != null && user!.email!.isNotEmpty) ...[
-            const SizedBox(height: 8),
+    return Scaffold(
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        title: const Text('Settings', style: TextStyle(color: Colors.white)),
+        iconTheme: const IconThemeData(color: Colors.white),
+      ),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (profileImage != null)
+              CircleAvatar(
+                radius: 50,
+                backgroundImage: profileImage,
+              )
+            else
+              const CircleAvatar(
+                radius: 50,
+                backgroundColor: Colors.white24,
+                child: Icon(Icons.person, size: 50, color: Colors.white),
+              ),
+            const SizedBox(height: 16),
             Text(
-              user.email!,
-              style: const TextStyle(color: Colors.white54, fontSize: 16),
+              (user?.displayName != null && user!.displayName!.isNotEmpty) 
+                  ? user.displayName! 
+                  : 'Account',
+              style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
+            ),
+            if (user?.email != null && user!.email!.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                user.email!,
+                style: const TextStyle(color: Colors.white54, fontSize: 16),
+              ),
+            ],
+            const SizedBox(height: 32),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.white12, 
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+              ),
+              onPressed: () async {
+                try {
+                  try {
+                    if (!kIsWeb && (defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS)) {
+                      await gsi.GoogleSignIn.instance.signOut();
+                    }
+                  } catch (_) {}
+                  
+                  await FirebaseAuth.instance.signOut();
+                  if (context.mounted) {
+                    Navigator.of(context).popUntil((route) => route.isFirst);
+                  }
+                } catch (e) {
+                  debugPrint('Error signing out: $e');
+                }
+              },
+              icon: const Icon(Icons.logout),
+              label: const Text('Sign Out', style: TextStyle(fontSize: 16)),
             ),
           ],
-          const SizedBox(height: 32),
-          ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.white12, 
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-            ),
-            onPressed: () async {
-              try {
-                // Safely attempt to disconnect native Google session (Android/iOS only)
-                try {
-                  if (!kIsWeb && (defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS)) {
-                    await gsi.GoogleSignIn.instance.signOut();
-                  }
-                } catch (_) {}
-                
-                await FirebaseAuth.instance.signOut();
-              } catch (e) {
-                debugPrint('Error signing out: $e');
-              }
-            },
-            icon: const Icon(Icons.logout),
-            label: const Text('Sign Out', style: TextStyle(fontSize: 16)),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -896,6 +999,8 @@ class _FeaturedMediaItemState extends State<FeaturedMediaItem> with SingleTicker
   Timer? _carouselTimer;
   String? _logoPath;
   bool _showContent = false;
+  String _contentRating = '';
+  String _displayYear = '';
   late AnimationController _progressController;
 
   @override
@@ -916,6 +1021,7 @@ class _FeaturedMediaItemState extends State<FeaturedMediaItem> with SingleTicker
       setState(() {
         _currentIndex = 0;
         _showContent = false;
+        _displayYear = '';
       });
       _fetchLogo();
       _startTimer();
@@ -940,6 +1046,7 @@ class _FeaturedMediaItemState extends State<FeaturedMediaItem> with SingleTicker
       if (!mounted) return;
       setState(() {
         _currentIndex = (_currentIndex + 1) % widget.mediaList.length;
+        _displayYear = '';
       });
       _progressController.forward(from: 0.0);
       _fetchLogo();
@@ -971,6 +1078,7 @@ class _FeaturedMediaItemState extends State<FeaturedMediaItem> with SingleTicker
       if (!mounted) return;
       setState(() {
         _currentIndex = index;
+        _displayYear = '';
       });
       _startTimer();
       _fetchLogo();
@@ -987,19 +1095,102 @@ class _FeaturedMediaItemState extends State<FeaturedMediaItem> with SingleTicker
       return;
     }
 
-    final url = 'https://api.themoviedb.org/3/$mediaType/$mediaId?api_key=$tmdbApiKey&append_to_response=images';
+    final url = 'https://api.themoviedb.org/3/$mediaType/$mediaId?api_key=$tmdbApiKey&append_to_response=images,content_ratings,release_dates&include_image_language=en,null';
     try {
       final data = await fetchWithCache(url);
       if (mounted && media['id'] == widget.mediaList[_currentIndex]['id']) {
         String? extractedLogo;
         if (data['images'] != null && data['images']['logos'] is List) {
           final logos = data['images']['logos'] as List;
-          if (logos.isNotEmpty) {
-            final enLogo = logos.firstWhere((l) => l is Map && l['iso_639_1'] == 'en', orElse: () => logos.first);
+          final validLogos = logos.where((l) => l is Map && !(l['file_path']?.toString().toLowerCase().endsWith('.svg') ?? false)).toList();
+          if (validLogos.isNotEmpty) {
+            validLogos.sort((a, b) {
+              final double voteA = double.tryParse(a['vote_average']?.toString() ?? '0') ?? 0.0;
+              final double voteB = double.tryParse(b['vote_average']?.toString() ?? '0') ?? 0.0;
+              return voteB.compareTo(voteA);
+            });
+            final enLogo = validLogos.firstWhere((l) => l['iso_639_1'] == 'en', orElse: () => validLogos.first);
             extractedLogo = enLogo['file_path'];
           }
         }
-        setState(() => _logoPath = extractedLogo);
+
+        String cert = '';
+        if (mediaType == 'movie' && data['release_dates'] != null && data['release_dates']['results'] is List) {
+          final results = data['release_dates']['results'] as List;
+          for (var r in results) {
+            if (r is Map && r['iso_3166_1'] == 'US' && r['release_dates'] is List) {
+              for (var d in r['release_dates']) {
+                if (d is Map && d['certification'] != null && d['certification'].toString().isNotEmpty) {
+                  cert = d['certification'].toString();
+                  break;
+                }
+              }
+              break;
+            }
+          }
+        } else if (mediaType == 'tv' && data['content_ratings'] != null && data['content_ratings']['results'] is List) {
+          final results = data['content_ratings']['results'] as List;
+          for (var r in results) {
+            if (r is Map && r['iso_3166_1'] == 'US' && r['rating'] != null) {
+              cert = r['rating'].toString();
+              break;
+            }
+          }
+        }
+
+        String fetchedYear = '';
+        if (mediaType == 'tv') {
+          final firstAir = data['first_air_date']?.toString();
+          final lastAir = data['last_air_date']?.toString();
+          final status = data['status']?.toString() ?? '';
+          final numSeasons = data['number_of_seasons'];
+
+          String startYear = '';
+          if (firstAir != null && firstAir.length >= 4) {
+            startYear = firstAir.substring(0, 4);
+          } else {
+            final fallback = media['first_air_date']?.toString();
+            if (fallback != null && fallback.length >= 4) startYear = fallback.substring(0, 4);
+          }
+
+          String endYear = '';
+          if (lastAir != null && lastAir.length >= 4) {
+            endYear = lastAir.substring(0, 4);
+          }
+
+          String seasonStr = '';
+          if (numSeasons != null && numSeasons > 0) {
+            seasonStr = ' • $numSeasons Season${numSeasons == 1 ? '' : 's'}';
+          }
+
+          if (startYear.isNotEmpty) {
+            if (status == 'Ended' || status == 'Canceled') {
+               if (endYear.isNotEmpty && endYear != startYear) {
+                 fetchedYear = '$startYear - $endYear$seasonStr';
+               } else {
+                 fetchedYear = '$startYear$seasonStr';
+               }
+            } else {
+               fetchedYear = '$startYear - Present$seasonStr';
+            }
+          } else if (seasonStr.isNotEmpty) {
+            fetchedYear = seasonStr.substring(3);
+          }
+        } else {
+          final releaseDateRaw = data['release_date'] ?? media['release_date'];
+          if (releaseDateRaw != null && releaseDateRaw.toString().length >= 4) {
+            fetchedYear = releaseDateRaw.toString().substring(0, 4);
+          }
+          final runtime = data['runtime'];
+          if (runtime != null && runtime > 0) {
+            final int hrs = runtime ~/ 60;
+            final int mins = runtime % 60;
+            final runtimeStr = hrs > 0 ? ' • ${hrs}h ${mins}m' : ' • ${mins}m';
+            fetchedYear = '$fetchedYear$runtimeStr';
+          }
+        }
+
+        setState(() { _logoPath = extractedLogo; _contentRating = cert; _displayYear = fetchedYear; });
       }
     } catch (_) {}
 
@@ -1034,6 +1225,7 @@ class _FeaturedMediaItemState extends State<FeaturedMediaItem> with SingleTicker
     final releaseDateRaw = media['release_date'] ?? media['first_air_date'];
     final releaseDate = releaseDateRaw?.toString() ?? '';
     final releaseYear = releaseDate.length >= 4 ? releaseDate.substring(0, 4) : '';
+    final displayYearText = _displayYear.isNotEmpty ? _displayYear : releaseYear;
     final voteAverageRaw = media['vote_average'];
     final voteAverage = voteAverageRaw != null
         ? double.tryParse(voteAverageRaw.toString())?.toStringAsFixed(1) ?? ''
@@ -1114,18 +1306,23 @@ class _FeaturedMediaItemState extends State<FeaturedMediaItem> with SingleTicker
               ),
             ),
           ),
-          Container(
-            height: 450,
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                colors: [
-                  Color(0xFF0F1014),
-                  Colors.transparent,
-                  Color(0xFF0F1014)
-                ],
-                begin: Alignment.bottomCenter,
-                end: Alignment.topCenter,
-                stops: [0.0, 0.4, 1.0],
+          Positioned(
+            top: -2,
+            bottom: -2,
+            left: 0,
+            right: 0,
+            child: Container(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    Color(0xFF0F1014),
+                    Colors.transparent,
+                    Color(0xFF0F1014)
+                  ],
+                  begin: Alignment.bottomCenter,
+                  end: Alignment.topCenter,
+                  stops: [0.0, 0.4, 1.0],
+                ),
               ),
             ),
           ),
@@ -1176,9 +1373,21 @@ class _FeaturedMediaItemState extends State<FeaturedMediaItem> with SingleTicker
                   runSpacing: 8,
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    if (releaseYear.isNotEmpty)
+                    if (_contentRating.isNotEmpty)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.white54),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          _contentRating,
+                          style: const TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    if (displayYearText.isNotEmpty)
                       Text(
-                        releaseYear,
+                        displayYearText,
                         style: const TextStyle(
                             color: Colors.white70,
                             fontSize: 16,
@@ -1381,71 +1590,532 @@ class _FeaturedMediaItemState extends State<FeaturedMediaItem> with SingleTicker
   }
 }
 
-class HorizontalMediaList extends StatelessWidget {
-  final String categoryTitle;
-  final List<dynamic> items;
+class HoverableMediaItem extends StatefulWidget {
+  final dynamic media;
+  final String heroTag;
+  final String imageUrl;
 
-  const HorizontalMediaList({super.key, required this.categoryTitle, required this.items});
+  const HoverableMediaItem({
+    super.key,
+    required this.media,
+    required this.heroTag,
+    required this.imageUrl,
+  });
+
+  @override
+  State<HoverableMediaItem> createState() => _HoverableMediaItemState();
+}
+
+class _HoverableMediaItemState extends State<HoverableMediaItem> {
+  bool _isHovered = false;
+  String _displayYear = '';
+  String _contentRating = '';
+  bool _detailsFetched = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _calculateInitialYear();
+  }
+
+  void _calculateInitialYear() {
+    final media = widget.media;
+    final releaseDateRaw = media['release_date'] ?? media['first_air_date'];
+    if (releaseDateRaw != null && releaseDateRaw.toString().length >= 4) {
+      _displayYear = releaseDateRaw.toString().substring(0, 4);
+    }
+  }
+
+  Future<void> _fetchMoreDetails() async {
+    if (_detailsFetched) return;
+    _detailsFetched = true;
+
+    final media = widget.media;
+    final mediaType = media['media_type'] ?? (media.containsKey('first_air_date') ? 'tv' : 'movie');
+    final mediaId = media['id'];
+
+    if (mediaId != null) {
+      try {
+        final url = 'https://api.themoviedb.org/3/$mediaType/$mediaId?api_key=$tmdbApiKey&append_to_response=content_ratings,release_dates';
+        final data = await fetchWithCache(url);
+        if (mounted) {
+          String cert = '';
+          if (mediaType == 'movie' && data['release_dates'] != null && data['release_dates']['results'] is List) {
+            final results = data['release_dates']['results'] as List;
+            for (var r in results) {
+              if (r is Map && r['iso_3166_1'] == 'US' && r['release_dates'] is List) {
+                for (var d in r['release_dates']) {
+                  if (d is Map && d['certification'] != null && d['certification'].toString().isNotEmpty) {
+                    cert = d['certification'].toString();
+                    break;
+                  }
+                }
+                break;
+              }
+            }
+          } else if (mediaType == 'tv' && data['content_ratings'] != null && data['content_ratings']['results'] is List) {
+            final results = data['content_ratings']['results'] as List;
+            for (var r in results) {
+              if (r is Map && r['iso_3166_1'] == 'US' && r['rating'] != null) {
+                cert = r['rating'].toString();
+                break;
+              }
+            }
+          }
+
+          if (mediaType == 'tv') {
+            final firstAir = data['first_air_date']?.toString();
+            final lastAir = data['last_air_date']?.toString();
+            final status = data['status']?.toString() ?? '';
+            final numSeasons = data['number_of_seasons'];
+
+            String startYear = '';
+            if (firstAir != null && firstAir.length >= 4) {
+              startYear = firstAir.substring(0, 4);
+            } else {
+              startYear = _displayYear;
+            }
+
+            String endYear = '';
+            if (lastAir != null && lastAir.length >= 4) {
+              endYear = lastAir.substring(0, 4);
+            }
+
+            String seasonStr = '';
+            if (numSeasons != null && numSeasons > 0) {
+              seasonStr = ' • $numSeasons Season${numSeasons == 1 ? '' : 's'}';
+            }
+
+            if (startYear.isNotEmpty) {
+              if (status == 'Ended' || status == 'Canceled') {
+                 if (endYear.isNotEmpty && endYear != startYear) {
+                   setState(() { _displayYear = '$startYear - $endYear$seasonStr'; });
+                 } else {
+                   setState(() { _displayYear = '$startYear$seasonStr'; });
+                 }
+              } else {
+                 setState(() { _displayYear = '$startYear - $endYear$seasonStr'; });
+              }
+            } else if (seasonStr.isNotEmpty) {
+              setState(() { _displayYear = seasonStr.substring(3); });
+            }
+          } else {
+            final runtime = data['runtime'];
+            if (runtime != null && runtime > 0) {
+              final int hrs = runtime ~/ 60;
+              final int mins = runtime % 60;
+              final runtimeStr = hrs > 0 ? ' • ${hrs}h ${mins}m' : ' • ${mins}m';
+              setState(() { _displayYear = '$_displayYear$runtimeStr'; });
+            }
+          }
+          
+          if (cert.isNotEmpty) {
+            setState(() { _contentRating = cert; });
+          }
+        }
+      } catch (_) {}
+    }
+  }
+
+  void _onHover(bool isHovered) {
+    setState(() => _isHovered = isHovered);
+    if (isHovered) {
+      _fetchMoreDetails();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-          child: Text(
-            categoryTitle,
-            style: const TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-              color: Colors.white,
-            ),
-          ),
-        ),
-        SizedBox(
-          height: 200,
-          child: ListView.builder(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 12.0),
-            itemCount: items.length,
-            itemBuilder: (context, index) {
-              final media = items[index];
-              final posterPath = media['poster_path'];
-              final imageUrl = posterPath != null
-                  ? 'https://image.tmdb.org/t/p/w500$posterPath'
-                  : 'https://via.placeholder.com/500x750?text=No+Image';
-              final heroTag = '${categoryTitle}_${media['media_type']}_${media['id']}_$index';
+    final media = widget.media;
+    final title = media['title'] ?? media['name'] ?? 'Unknown';
+    final voteAverageRaw = media['vote_average'];
+    final voteAverage = voteAverageRaw != null
+        ? double.tryParse(voteAverageRaw.toString())?.toStringAsFixed(1) ?? '0.0'
+        : '0.0';
+    final overview = media['overview']?.toString() ?? 'No overview available.';
+    final isMobile = MediaQuery.sizeOf(context).width < 600;
 
-              return GestureDetector(
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (context) => MediaDetailsPage(media: media, heroTag: heroTag)),
-                  );
-                },
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4.0),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(8.0),
-                    child: Hero(
-                      tag: heroTag,
-                      child: CachedNetworkImage(
-                        imageUrl: imageUrl,
-                        width: 135,
-                        fit: BoxFit.cover,
-                        placeholder: (context, url) => Container(width: 135, color: Colors.black26),
-                        errorWidget: (context, url, error) => Container(
-                          width: 135,
-                          color: Colors.black26,
-                          child: const Icon(Icons.broken_image, color: Colors.white54),
+    final mediaType = media['media_type'] ?? (media.containsKey('first_air_date') ? 'tv' : 'movie');
+    final isTvShow = mediaType == 'tv';
+    double currentProgress = 0.0;
+    int selectedSeason = 1;
+    int selectedEpisode = 1;
+
+    if (isTvShow) {
+      // Mock Database Variables for tracking watched progress
+      final Map<int, Map<int, double>> tvProgress = {
+        1: {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0, 6: 1.0, 7: 1.0, 8: 1.0},
+        2: {1: 1.0, 2: 0.45},
+      };
+      if (tvProgress.isNotEmpty) {
+        int maxS = tvProgress.keys.reduce((a, b) => a > b ? a : b);
+        if (tvProgress[maxS]!.isNotEmpty) {
+          int maxE = tvProgress[maxS]!.keys.reduce((a, b) => a > b ? a : b);
+          selectedSeason = maxS;
+          selectedEpisode = maxE;
+          currentProgress = tvProgress[maxS]![maxE]!;
+        }
+      }
+    } else {
+      currentProgress = 1.0; // Mock movie progress
+    }
+
+    bool isFullyWatched = !isTvShow && currentProgress >= 1.0;
+
+    return MouseRegion(
+      onEnter: isMobile ? null : (_) => _onHover(true),
+      onExit: isMobile ? null : (_) => _onHover(false),
+      child: GestureDetector(
+        onTap: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => MediaDetailsPage(media: media, heroTag: widget.heroTag),
+            ),
+          );
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+          margin: const EdgeInsets.symmetric(horizontal: 4.0),
+          decoration: BoxDecoration(
+            color: _isHovered ? const Color(0xFF1E1F24) : Colors.transparent,
+            borderRadius: BorderRadius.circular(8.0),
+            border: Border.all(
+              color: _isHovered ? Colors.white24 : Colors.transparent,
+              width: 1,
+            ),
+            boxShadow: _isHovered
+                ? [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.5),
+                      blurRadius: 12,
+                      spreadRadius: 2,
+                    )
+                  ]
+                : [],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(7.0),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Hero(
+                  tag: widget.heroTag,
+                  child: CachedNetworkImage(
+                    imageUrl: widget.imageUrl,
+                    width: 135,
+                    fit: BoxFit.cover,
+                    placeholder: (context, url) => Container(width: 135, color: Colors.black26),
+                    errorWidget: (context, url, error) => Container(
+                      width: 135,
+                      color: Colors.black26,
+                      child: const Icon(Icons.broken_image, color: Colors.white54),
+                    ),
+                  ),
+                ),
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 300),
+                  curve: Curves.easeOut,
+                  width: _isHovered ? 200 : 0,
+                  child: ClipRect(
+                    child: OverflowBox(
+                      alignment: Alignment.centerLeft,
+                      minWidth: 200,
+                      maxWidth: 200,
+                      child: AnimatedOpacity(
+                        opacity: _isHovered ? 1.0 : 0.0,
+                        duration: const Duration(milliseconds: 250),
+                        curve: Curves.easeIn,
+                        child: Padding(
+                          padding: const EdgeInsets.all(12.0),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                title,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 14,
+                                ),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 4),
+                              if (_contentRating.isNotEmpty || _displayYear.isNotEmpty)
+                                Row(
+                                  children: [
+                                    if (_contentRating.isNotEmpty) ...[
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                        decoration: BoxDecoration(
+                                          border: Border.all(color: Colors.white54),
+                                          borderRadius: BorderRadius.circular(4),
+                                        ),
+                                        child: Text(
+                                          _contentRating,
+                                          style: const TextStyle(color: Colors.white70, fontSize: 10, fontWeight: FontWeight.bold),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 6),
+                                    ],
+                                    if (_displayYear.isNotEmpty)
+                                      Expanded(
+                                        child: Text(
+                                          _displayYear,
+                                          style: const TextStyle(color: Colors.white70, fontSize: 12),
+                                          maxLines: 1,
+                                          softWrap: false,
+                                          overflow: TextOverflow.fade,
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              const SizedBox(height: 6),
+                              Row(
+                                children: [
+                                  const Icon(Icons.star, color: Color(0xFF1CE783), size: 14),
+                                  const SizedBox(width: 4),
+                                  Expanded(
+                                    child: Text(
+                                      '$voteAverage / 10',
+                                      style: const TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                      maxLines: 1,
+                                      softWrap: false,
+                                      overflow: TextOverflow.fade,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              if (isFullyWatched) ...[
+                                const SizedBox(height: 6),
+                                const Row(
+                                  children: [
+                                    Text('Watched', style: TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.w600)),
+                                    SizedBox(width: 4),
+                                    Icon(Icons.check_circle, color: Color(0xFF1CE783), size: 12),
+                                  ],
+                                ),
+                              ] else if (currentProgress > 0 && currentProgress < 1.0) ...[
+                                const SizedBox(height: 6),
+                                Row(
+                                  children: [
+                                    Text(
+                                      isTvShow ? 'Resume S$selectedSeason E$selectedEpisode' : 'Resume',
+                                      style: const TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.w600),
+                                      maxLines: 1,
+                                      softWrap: false,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Expanded(
+                                      child: LinearProgressIndicator(
+                                        value: currentProgress,
+                                        backgroundColor: Colors.white24,
+                                        valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF1CE783)),
+                                        minHeight: 4,
+                                        borderRadius: BorderRadius.circular(2),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 4),
+                                  ],
+                                ),
+                              ],
+                              const SizedBox(height: 8),
+                              Expanded(
+                                child: Text(
+                                  overview,
+                                  style: const TextStyle(
+                                    color: Colors.white54,
+                                    fontSize: 11,
+                                    height: 1.3,
+                                  ),
+                                  maxLines: 4,
+                                  overflow: TextOverflow.fade,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
                   ),
                 ),
-              );
-            },
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class HorizontalMediaList extends StatefulWidget {
+  final String categoryTitle;
+  final List<dynamic> items;
+  final bool showTitle;
+  final EdgeInsetsGeometry? listPadding;
+
+  const HorizontalMediaList({
+    super.key, 
+    required this.categoryTitle, 
+    required this.items,
+    this.showTitle = true,
+    this.listPadding,
+  });
+
+  @override
+  State<HorizontalMediaList> createState() => _HorizontalMediaListState();
+}
+
+class _HorizontalMediaListState extends State<HorizontalMediaList> {
+  final ScrollController _scrollController = ScrollController();
+  bool _isHovering = false;
+  bool _canScrollLeft = false;
+  bool _canScrollRight = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_updateScrollButtons);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _updateScrollButtons());
+  }
+
+  @override
+  void dispose() {
+    _scrollController.removeListener(_updateScrollButtons);
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _updateScrollButtons() {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final canScrollLeft = position.pixels > 0;
+    final canScrollRight = position.pixels < position.maxScrollExtent;
+
+    if (_canScrollLeft != canScrollLeft || _canScrollRight != canScrollRight) {
+      setState(() {
+        _canScrollLeft = canScrollLeft;
+        _canScrollRight = canScrollRight;
+      });
+    }
+  }
+
+  void _scroll(double amount) {
+    if (!_scrollController.hasClients) return;
+    final target = (_scrollController.offset + amount).clamp(
+      _scrollController.position.minScrollExtent,
+      _scrollController.position.maxScrollExtent,
+    );
+    _scrollController.animateTo(
+      target,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOut,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isMobile = MediaQuery.sizeOf(context).width < 600;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (widget.showTitle)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+            child: Text(
+              widget.categoryTitle,
+              style: const TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
+              ),
+            ),
+          ),
+        MouseRegion(
+          onEnter: isMobile ? null : (_) => setState(() => _isHovering = true),
+          onExit: isMobile ? null : (_) => setState(() => _isHovering = false),
+          child: SizedBox(
+            height: 200,
+            child: Stack(
+              children: [
+                ListView.builder(
+                  controller: _scrollController,
+                  scrollDirection: Axis.horizontal,
+              padding: widget.listPadding ?? const EdgeInsets.only(left: 12.0, right: 212.0),
+                  itemCount: widget.items.length,
+                  itemBuilder: (context, index) {
+                    final media = widget.items[index];
+                    final posterPath = media['poster_path'];
+                    final imageUrl = posterPath != null
+                        ? 'https://image.tmdb.org/t/p/w500$posterPath'
+                        : 'https://via.placeholder.com/500x750?text=No+Image';
+                    final heroTag = '${widget.categoryTitle}_${media['media_type']}_${media['id']}_$index';
+
+                    return HoverableMediaItem(
+                      media: media,
+                      heroTag: heroTag,
+                      imageUrl: imageUrl,
+                    );
+                  },
+                ),
+                if (!isMobile)
+                  IgnorePointer(
+                    ignoring: !(_isHovering && _canScrollLeft),
+                    child: AnimatedOpacity(
+                      opacity: (_isHovering && _canScrollLeft) ? 1.0 : 0.0,
+                      duration: const Duration(milliseconds: 200),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Padding(
+                          padding: const EdgeInsets.only(left: 8.0),
+                          child: IconButton(
+                            iconSize: 32,
+                            color: Colors.white,
+                            style: IconButton.styleFrom(
+                              backgroundColor: Colors.black.withOpacity(0.7),
+                              hoverColor: Colors.black,
+                            ),
+                            icon: const Icon(Icons.chevron_left),
+                            onPressed: _canScrollLeft ? () => _scroll(-800) : null,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                if (!isMobile)
+                  IgnorePointer(
+                    ignoring: !(_isHovering && _canScrollRight),
+                    child: AnimatedOpacity(
+                      opacity: (_isHovering && _canScrollRight) ? 1.0 : 0.0,
+                      duration: const Duration(milliseconds: 200),
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: Padding(
+                          padding: const EdgeInsets.only(right: 8.0),
+                          child: IconButton(
+                            iconSize: 32,
+                            color: Colors.white,
+                            style: IconButton.styleFrom(
+                              backgroundColor: Colors.black.withOpacity(0.7),
+                              hoverColor: Colors.black,
+                            ),
+                            icon: const Icon(Icons.chevron_right),
+                            onPressed: _canScrollRight ? () => _scroll(800) : null,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
       ],
@@ -1519,7 +2189,7 @@ class _MediaCategoryBodyState extends State<MediaCategoryBody> with AutomaticKee
       if (mounted) {
         setState(() {
           final rawTrending = trendingData['results'] as List? ?? [];
-          trendingList = rawTrending.where((item) => _isReleased(item)).toList();
+          trendingList = rawTrending.where((item) => _isReleased(item, strictFilter: true)).toList();
           // Mark trending items as seen so they don't repeat in genre lists
           for (var item in trendingList) {
             item['media_type'] = widget.mediaType;
@@ -1609,12 +2279,16 @@ class _GenreRowState extends State<GenreRow> {
     await Future.delayed(Duration(milliseconds: (widget.index % 5) * 200));
 
     try {
-      final url = 'https://api.themoviedb.org/3/discover/${widget.mediaType}?api_key=$tmdbApiKey&with_genres=${widget.genreId}';
+      String url = 'https://api.themoviedb.org/3/discover/${widget.mediaType}?api_key=$tmdbApiKey&with_genres=${widget.genreId}';
+      if (widget.mediaType == 'movie') {
+        url += '&with_runtime.gte=20';
+      }
+
       final data = await fetchWithCache(url);
       if (mounted) {
         List<dynamic> deduplicatedItems = [];
         for (var item in (data['results'] as List? ?? [])) {
-          if (!_isReleased(item)) continue;
+          if (!_isReleased(item, strictFilter: true)) continue;
           final int? id = item['id'];
           if (id != null && !widget.seenMediaIds.contains(id)) {
             item['media_type'] = widget.mediaType;
@@ -1670,6 +2344,7 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
   bool _isColorExtracted = false;
   bool _showContent = false;
   String? _logoPath;
+  String _contentRating = '';
   final Map<int, List<dynamic>> _seasonEpisodesData = {};
   bool _isCamRelease = false;
   
@@ -1713,7 +2388,7 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
     }
 
     final url = Uri.parse(
-        'https://api.themoviedb.org/3/$mediaType/$mediaId?api_key=$apiKey&append_to_response=credits,reviews,videos,release_dates,images');
+        'https://api.themoviedb.org/3/$mediaType/$mediaId?api_key=$apiKey&append_to_response=credits,reviews,videos,release_dates,images,content_ratings,similar&include_image_language=en,null');
     try {
       final response = await http.get(url);
       if (response.statusCode == 200) {
@@ -1729,49 +2404,85 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
           _movieProgress = 1.0; // Movie is 100% watched
         }
 
-        bool isCam = false;
-        // Parse the US release dates to determine if the latest current release is strictly Theatrical (Types 2 or 3)
+        String cert = '';
         if (mediaType == 'movie' && data['release_dates'] != null && data['release_dates']['results'] is List) {
           final results = data['release_dates']['results'] as List;
           for (var r in results) {
-            if (r is Map && r['iso_3166_1'] == 'US') {
-              if (r['release_dates'] is List) {
-                final dates = r['release_dates'] as List;
-                final now = DateTime.now();
-                List<Map<String, dynamic>> pastReleases = [];
+            if (r is Map && r['iso_3166_1'] == 'US' && r['release_dates'] is List) {
+              for (var d in r['release_dates']) {
+                if (d is Map && d['certification'] != null && d['certification'].toString().isNotEmpty) {
+                  cert = d['certification'].toString();
+                  break;
+                }
+              }
+              break;
+            }
+          }
+        } else if (mediaType == 'tv' && data['content_ratings'] != null && data['content_ratings']['results'] is List) {
+          final results = data['content_ratings']['results'] as List;
+          for (var r in results) {
+            if (r is Map && r['iso_3166_1'] == 'US' && r['rating'] != null) {
+              cert = r['rating'].toString();
+              break;
+            }
+          }
+        }
 
-                for (var d in dates) {
-                  if (d is Map && d['release_date'] != null) {
-                    final date = DateTime.tryParse(d['release_date']);
-                    // Only consider release dates that have already occurred
-                    if (date != null && date.isBefore(now)) {
-                      pastReleases.add({
-                        'date': date,
-                        'type': d['type'] as int? ?? 0,
-                      });
+        bool isCam = false;
+        // Parse the US release dates to determine if the latest current release is strictly Theatrical (Types 2 or 3)
+        if (mediaType == 'movie' && data['release_dates'] != null && data['release_dates']['results'] is List) {
+          bool isOlderThanOneYear = false;
+          if (data['release_date'] != null && data['release_date'].toString().isNotEmpty) {
+            try {
+              final mainRelease = DateTime.parse(data['release_date'].toString());
+              if (DateTime.now().difference(mainRelease).inDays > 365) {
+                isOlderThanOneYear = true;
+              }
+            } catch (_) {}
+          }
+
+          if (!isOlderThanOneYear) {
+            final results = data['release_dates']['results'] as List;
+            for (var r in results) {
+              if (r is Map && r['iso_3166_1'] == 'US') {
+                if (r['release_dates'] is List) {
+                  final dates = r['release_dates'] as List;
+                  final now = DateTime.now();
+                  List<Map<String, dynamic>> pastReleases = [];
+
+                  for (var d in dates) {
+                    if (d is Map && d['release_date'] != null) {
+                      final date = DateTime.tryParse(d['release_date']);
+                      // Only consider release dates that have already occurred
+                      if (date != null && date.isBefore(now)) {
+                        pastReleases.add({
+                          'date': date,
+                          'type': d['type'] as int? ?? 0,
+                        });
+                      }
                     }
                   }
-                }
 
-                if (pastReleases.isNotEmpty) {
-                  // Sort chronologically by date
-                  pastReleases.sort((a, b) => (a['date'] as DateTime).compareTo(b['date'] as DateTime));
-                  final latestType = pastReleases.last['type'] as int;
+                  if (pastReleases.isNotEmpty) {
+                    // Sort chronologically by date
+                    pastReleases.sort((a, b) => (a['date'] as DateTime).compareTo(b['date'] as DateTime));
+                    final latestType = pastReleases.last['type'] as int;
 
-                  if (latestType == 2 || latestType == 3) {
-                    if (pastReleases.length == 1) {
-                      isCam = true;
-                    } else {
-                      final previousType = pastReleases[pastReleases.length - 2]['type'] as int;
-                      // Type 1 is Premiere. Types 2 and 3 are Limited/Theatrical.
-                      if (previousType == 1 || previousType == 2 || previousType == 3) {
+                    if (latestType == 2 || latestType == 3) {
+                      if (pastReleases.length == 1) {
                         isCam = true;
+                      } else {
+                        final previousType = pastReleases[pastReleases.length - 2]['type'] as int;
+                        // Type 1 is Premiere. Types 2 and 3 are Limited/Theatrical.
+                        if (previousType == 1 || previousType == 2 || previousType == 3) {
+                          isCam = true;
+                        }
                       }
                     }
                   }
                 }
+                break;
               }
-              break;
             }
           }
         }
@@ -1779,8 +2490,14 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
         String? extractedLogo;
         if (data['images'] != null && data['images']['logos'] is List) {
           final logos = data['images']['logos'] as List;
-          if (logos.isNotEmpty) {
-            final enLogo = logos.firstWhere((l) => l is Map && l['iso_639_1'] == 'en', orElse: () => logos.first);
+          final validLogos = logos.where((l) => l is Map && !(l['file_path']?.toString().toLowerCase().endsWith('.svg') ?? false)).toList();
+          if (validLogos.isNotEmpty) {
+            validLogos.sort((a, b) {
+              final double voteA = double.tryParse(a['vote_average']?.toString() ?? '0') ?? 0.0;
+              final double voteB = double.tryParse(b['vote_average']?.toString() ?? '0') ?? 0.0;
+              return voteB.compareTo(voteA);
+            });
+            final enLogo = validLogos.firstWhere((l) => l['iso_639_1'] == 'en', orElse: () => validLogos.first);
             extractedLogo = enLogo['file_path'];
           }
         }
@@ -1791,6 +2508,7 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
             isLoadingDetails = false;
             _isCamRelease = isCam;
             _logoPath = extractedLogo;
+            _contentRating = cert;
 
             // Auto-select the most recent or next episode for TV Shows
             if (mediaType == 'tv' && _tvProgress.isNotEmpty) {
@@ -2165,6 +2883,15 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
     final reviewsData = details['reviews'] is Map ? details['reviews'] as Map : null;
     final reviews = (reviewsData != null && reviewsData['results'] is List ? reviewsData['results'] as List : []).take(10).toList();
 
+    final similarData = details['similar'] is Map ? details['similar'] as Map : null;
+    final similarListRaw = similarData != null && similarData['results'] is List ? similarData['results'] as List : [];
+    final similarList = similarListRaw.map((item) {
+      if (item is Map && !item.containsKey('media_type')) {
+        item['media_type'] = isTvShow ? 'tv' : 'movie';
+      }
+      return item;
+    }).where((item) => _isReleased(item, strictFilter: true)).take(15).toList();
+
     final backgroundImageUrl = backdropPath != null
         ? 'https://image.tmdb.org/t/p/original$backdropPath'
         : (posterPath != null
@@ -2187,7 +2914,7 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
         fit: StackFit.expand,
         children: [
           Opacity(
-            opacity: 0.3,
+            opacity: 0.2,
             child: CachedNetworkImage(
               imageUrl: backgroundImageUrl,
               fit: BoxFit.cover,
@@ -2250,6 +2977,18 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
                               runSpacing: 8,
                               crossAxisAlignment: WrapCrossAlignment.center,
                               children: [
+                                if (_contentRating.isNotEmpty)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      border: Border.all(color: Colors.white54),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: Text(
+                                      _contentRating,
+                                      style: TextStyle(color: Colors.white70, fontSize: isMobile ? 12 : 14, fontWeight: FontWeight.bold),
+                                    ),
+                                  ),
                                 Text(
                                   releaseYear,
                                   style: TextStyle(
@@ -2432,7 +3171,7 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
                             castList.isEmpty
                                 ? const Text('Cast information is unavailable.', style: TextStyle(color: Colors.white70))
                                 : SizedBox(
-                          height: 150,
+                          height: 190,
                           child: ListView.builder(
                             scrollDirection: Axis.horizontal,
                             itemCount: castList.length,
@@ -2445,45 +3184,93 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
                                   ? 'https://image.tmdb.org/t/p/w200$profilePath'
                                   : 'https://via.placeholder.com/200x300?text=No+Image';
                               final actorName = actor['name']?.toString() ?? 'Unknown';
+                              final characterName = actor['character']?.toString() ?? '';
+                              final actorId = actor['id'];
 
-                              return Container(
-                                width: 90,
-                                margin: const EdgeInsets.only(right: 12.0),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.center,
-                                  children: [
-                                    ClipOval(
-                                      child: CachedNetworkImage(
-                                        imageUrl: actorImageUrl,
-                                        width: 70,
-                                        height: 70,
-                                        fit: BoxFit.cover,
-                                        placeholder: (context, url) => Container(width: 70, height: 70, color: Colors.white24),
-                                        errorWidget: (context, url, error) => Container(
-                                          width: 70,
-                                          height: 70,
-                                          color: Colors.white24,
-                                          child: const Icon(Icons.person, color: Colors.white54),
+                              return MouseRegion(
+                                cursor: SystemMouseCursors.click,
+                                child: GestureDetector(
+                                  onTap: () {
+                                    if (actorId != null) {
+                                      Navigator.push(
+                                        context,
+                                        MaterialPageRoute(builder: (context) => ActorDetailsPage(actorId: actorId, actorName: actorName)),
+                                      );
+                                    }
+                                  },
+                                  child: Container(
+                                    width: 90,
+                                    margin: const EdgeInsets.only(right: 12.0),
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.center,
+                                      children: [
+                                        ClipOval(
+                                          child: CachedNetworkImage(
+                                            imageUrl: actorImageUrl,
+                                            width: 70,
+                                            height: 70,
+                                            fit: BoxFit.cover,
+                                            placeholder: (context, url) => Container(width: 70, height: 70, color: Colors.white24),
+                                            errorWidget: (context, url, error) => Container(
+                                              width: 70,
+                                              height: 70,
+                                              color: Colors.white24,
+                                              child: const Icon(Icons.person, color: Colors.white54),
+                                            ),
+                                          ),
                                         ),
-                                      ),
+                                        const SizedBox(height: 8),
+                                        Text(
+                                          actorName,
+                                          style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.bold),
+                                          textAlign: TextAlign.center,
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        if (characterName.isNotEmpty) ...[
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            characterName,
+                                            style: const TextStyle(
+                                                color: Colors.white54,
+                                                fontSize: 11,
+                                                fontStyle: FontStyle.italic),
+                                            textAlign: TextAlign.center,
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ],
+                                      ],
                                     ),
-                                    const SizedBox(height: 8),
-                                    Text(
-                                      actorName,
-                                      style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.bold),
-                                      textAlign: TextAlign.center,
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ],
+                                  ),
                                 ),
                               );
                             },
                           ),
                   ),
+                            
+                            if (similarList.isNotEmpty) ...[
+                              const SizedBox(height: 40),
+                              Text(
+                                isTvShow ? 'SIMILAR SHOWS' : 'SIMILAR FILMS',
+                                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.bold,
+                                      letterSpacing: 1.2,
+                                    ),
+                              ),
+                              const SizedBox(height: 16),
+                              HorizontalMediaList(
+                                categoryTitle: 'similar',
+                                items: similarList,
+                                showTitle: false,
+                                listPadding: const EdgeInsets.only(right: 212.0),
+                              ),
+                              
+                            ],
                             
                             if (isTvShow) ...[
                               const SizedBox(height: 40),
@@ -2619,7 +3406,7 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
                                             child: Padding(
                                               padding: const EdgeInsets.all(8.0),
                                               child: Row(
-                                                crossAxisAlignment: CrossAxisAlignment.start,
+                                                crossAxisAlignment: (epStillPath == null && subtitleWidget == null) ? CrossAxisAlignment.center : CrossAxisAlignment.start,
                                                 children: [
                                                 GestureDetector(
                                                   onTap: () {
@@ -2635,22 +3422,29 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
                                                     );
                                                   },
                                                   child: SizedBox(
-                                                    width: 150,
-                                                    child: ClipRRect(
-                                                      borderRadius: BorderRadius.circular(8.0),
-                                                      child: Stack(
-                                                        alignment: Alignment.center,
-                                                        children: [
-                                                          epStillPath != null
-                                                              ? AspectRatio(aspectRatio: 16 / 9, child: CachedNetworkImage(imageUrl: 'https://image.tmdb.org/t/p/w500$epStillPath', fit: BoxFit.cover))
-                                                              : AspectRatio(aspectRatio: 16 / 9, child: Container(color: Colors.white12, child: const Icon(Icons.tv, color: Colors.white54, size: 24))),
-                                                          if (isInteractionActive) ...[
-                                                            Positioned.fill(child: Container(color: Colors.black45)),
-                                                            const Icon(Icons.play_circle_fill, color: Colors.white, size: 36),
-                                                          ],
-                                                        ],
-                                                      ), // closes Stack
-                                                    ), // closes ClipRRect
+                                                    width: epStillPath != null ? 150 : 48,
+                                                    height: epStillPath != null ? null : 48,
+                                                    child: epStillPath != null
+                                                        ? ClipRRect(
+                                                            borderRadius: BorderRadius.circular(8.0),
+                                                            child: Stack(
+                                                              alignment: Alignment.center,
+                                                              children: [
+                                                                AspectRatio(aspectRatio: 16 / 9, child: CachedNetworkImage(imageUrl: 'https://image.tmdb.org/t/p/w500$epStillPath', fit: BoxFit.cover)),
+                                                                if (isMobile || isInteractionActive) ...[
+                                                                  Positioned.fill(child: Container(color: Colors.black45)),
+                                                                  const Icon(Icons.play_circle_fill, color: Colors.white, size: 36),
+                                                                ],
+                                                              ],
+                                                            ),
+                                                          )
+                                                        : Center(
+                                                            child: Icon(
+                                                              Icons.play_circle_fill,
+                                                              color: (isMobile || isInteractionActive) ? Colors.white : Colors.white54,
+                                                              size: 32,
+                                                            ),
+                                                          ),
                                                   ), // closes SizedBox
                                                 ), // closes GestureDetector
                                                   Expanded(
@@ -2662,7 +3456,16 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
                                                           Row(
                                                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                                             children: [
-                                                              Expanded(child: Text(titleText, style: TextStyle(color: isSelected ? const Color(0xFF1CE783) : Colors.white, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal))),
+                                                              Expanded(
+                                                                child: Text(
+                                                                  titleText,
+                                                                  style: TextStyle(
+                                                                    color: isSelected ? const Color(0xFF1CE783) : Colors.white,
+                                                                    fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                                                                    fontSize: (epStillPath == null && subtitleWidget == null) ? 16 : null,
+                                                                  ),
+                                                                ),
+                                                              ),
                                                               const SizedBox(width: 8),
                                                               _buildProgressIndicator(progress),
                                                             ],
@@ -2789,6 +3592,161 @@ class _MediaDetailsPageState extends State<MediaDetailsPage> {
   }
 }
 
+class ActorDetailsPage extends StatefulWidget {
+  final int actorId;
+  final String actorName;
+  const ActorDetailsPage({super.key, required this.actorId, required this.actorName});
+
+  @override
+  State<ActorDetailsPage> createState() => _ActorDetailsPageState();
+}
+
+class _ActorDetailsPageState extends State<ActorDetailsPage> {
+  bool isLoading = true;
+  Map<String, dynamic>? actorDetails;
+  List<dynamic> knownFor = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchActorDetails();
+  }
+
+  Future<void> _fetchActorDetails() async {
+    try {
+      final url = 'https://api.themoviedb.org/3/person/${widget.actorId}?api_key=$tmdbApiKey&append_to_response=combined_credits';
+      final data = await fetchWithCache(url);
+      if (mounted) {
+        setState(() {
+          actorDetails = data;
+          final cast = data['combined_credits']?['cast'] as List? ?? [];
+          // Sort by vote count to show the most popular works first
+          cast.sort((a, b) {
+            final double popA = double.tryParse(a['vote_count']?.toString() ?? '0') ?? 0.0;
+            final double popB = double.tryParse(b['vote_count']?.toString() ?? '0') ?? 0.0;
+            return popB.compareTo(popA);
+          });
+          // Filter out unreleased titles and grab the top 20
+          knownFor = cast.where((item) => _isReleased(item, strictFilter: true)).take(20).toList();
+          isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => isLoading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isMobile = MediaQuery.sizeOf(context).width < 600;
+
+    if (isLoading) {
+      return Scaffold(
+        backgroundColor: const Color(0xFF0F1014),
+        appBar: AppBar(backgroundColor: Colors.transparent, elevation: 0, iconTheme: const IconThemeData(color: Colors.white)),
+        body: const Center(child: CircularProgressIndicator(color: Color(0xFF1CE783))),
+      );
+    }
+
+    if (actorDetails == null) {
+      return Scaffold(
+        backgroundColor: const Color(0xFF0F1014),
+        appBar: AppBar(backgroundColor: Colors.transparent, elevation: 0, iconTheme: const IconThemeData(color: Colors.white)),
+        body: const Center(child: Text('Failed to load actor details.', style: TextStyle(color: Colors.white))),
+      );
+    }
+
+    final details = actorDetails!;
+    final profilePath = details['profile_path']?.toString();
+    final imageUrl = profilePath != null
+        ? 'https://image.tmdb.org/t/p/w500$profilePath'
+        : 'https://via.placeholder.com/500x750?text=No+Image';
+    final biography = details['biography']?.toString() ?? 'No biography available.';
+    final birthday = details['birthday']?.toString() ?? '';
+    final deathday = details['deathday']?.toString() ?? '';
+    final placeOfBirth = details['place_of_birth']?.toString() ?? '';
+    final knownForDepartment = details['known_for_department']?.toString() ?? '';
+
+    String ageStr = '';
+    if (birthday.isNotEmpty) {
+      try {
+        final bDate = DateTime.parse(birthday);
+        final eDate = deathday.isNotEmpty ? DateTime.parse(deathday) : DateTime.now();
+        int age = eDate.year - bDate.year;
+        if (eDate.month < bDate.month || (eDate.month == bDate.month && eDate.day < bDate.day)) {
+          age--;
+        }
+        ageStr = ' (Age $age)';
+      } catch (_) {}
+    }
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF0F1014),
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        iconTheme: const IconThemeData(color: Colors.white),
+        title: Text(widget.actorName, style: const TextStyle(color: Colors.white)),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(12.0),
+                  child: CachedNetworkImage(
+                    imageUrl: imageUrl,
+                    width: isMobile ? 120 : 200,
+                    fit: BoxFit.cover,
+                    placeholder: (context, url) => Container(width: isMobile ? 120 : 200, height: isMobile ? 180 : 300, color: Colors.white24),
+                    errorWidget: (context, url, error) => Container(width: isMobile ? 120 : 200, height: isMobile ? 180 : 300, color: Colors.white24, child: const Icon(Icons.person, color: Colors.white54, size: 50)),
+                  ),
+                ),
+                const SizedBox(width: 24),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.actorName,
+                        style: TextStyle(color: Colors.white, fontSize: isMobile ? 24 : 32, fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 16),
+                      if (knownForDepartment.isNotEmpty)
+                        Padding(padding: const EdgeInsets.only(bottom: 8.0), child: Text('Known For: $knownForDepartment', style: const TextStyle(color: Colors.white70, fontSize: 16))),
+                      if (birthday.isNotEmpty)
+                        Padding(padding: const EdgeInsets.only(bottom: 8.0), child: Text('Born: $birthday${deathday.isEmpty ? ageStr : ''}', style: const TextStyle(color: Colors.white70, fontSize: 16))),
+                      if (deathday.isNotEmpty)
+                        Padding(padding: const EdgeInsets.only(bottom: 8.0), child: Text('Died: $deathday$ageStr', style: const TextStyle(color: Colors.white70, fontSize: 16))),
+                      if (placeOfBirth.isNotEmpty)
+                        Padding(padding: const EdgeInsets.only(bottom: 8.0), child: Text('Place of Birth: $placeOfBirth', style: const TextStyle(color: Colors.white70, fontSize: 16))),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 32),
+            const Text('Biography', style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 12),
+            Text(
+              biography,
+              style: const TextStyle(color: Colors.white70, fontSize: 16, height: 1.5),
+            ),
+            const SizedBox(height: 40),
+            if (knownFor.isNotEmpty)
+              HorizontalMediaList(categoryTitle: 'Known For', items: knownFor),
+            const SizedBox(height: 40),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class TrailerPlayerDialog extends StatefulWidget {
   final String trailerKey;
   const TrailerPlayerDialog({super.key, required this.trailerKey});
@@ -2802,6 +3760,7 @@ class _TrailerPlayerDialogState extends State<TrailerPlayerDialog> {
   WebViewController? _webController;
   bool _isLoading = true;
   bool _hasFailed = false;
+  bool _triedFallbackProxy = false;
 
   @override
   void initState() {
@@ -2809,7 +3768,11 @@ class _TrailerPlayerDialogState extends State<TrailerPlayerDialog> {
     final useWebView = !kIsWeb && (defaultTargetPlatform == TargetPlatform.windows || defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS);
     
     if (useWebView) {
-      _webController = WebViewController()
+      final PlatformWebViewControllerCreationParams params = defaultTargetPlatform == TargetPlatform.windows
+          ? WindowsWebViewControllerCreationParams()
+          : const PlatformWebViewControllerCreationParams();
+
+      _webController = WebViewController.fromPlatformCreationParams(params)
         ..setJavaScriptMode(JavaScriptMode.unrestricted)
         ..setBackgroundColor(Colors.black)
         ..setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
@@ -2821,6 +3784,7 @@ class _TrailerPlayerDialogState extends State<TrailerPlayerDialog> {
         } catch (_) {}
       }
 
+      // ignore: avoid_single_cascade_in_expression_statements
       _webController!
         ..setNavigationDelegate(
           NavigationDelegate(
@@ -2841,6 +3805,14 @@ class _TrailerPlayerDialogState extends State<TrailerPlayerDialog> {
             },
             onWebResourceError: (error) {
               debugPrint('Webview Resource Error: ${error.description}');
+              if (!_triedFallbackProxy && 
+                  (error.description.toLowerCase().contains('refused') || 
+                   error.description.toLowerCase().contains('connection') || 
+                   error.description.toLowerCase().contains('failed'))) {
+                setState(() => _triedFallbackProxy = true);
+                _loadHtml();
+                return;
+              }
               // Only fallback if the main video page completely fails to load
               if (error.isForMainFrame == true) {
                 _fallbackToExternal();
@@ -2848,28 +3820,14 @@ class _TrailerPlayerDialogState extends State<TrailerPlayerDialog> {
             },
             onHttpError: (error) {
               debugPrint('Webview HTTP Error: ${error.response?.statusCode}');
+              if (!_triedFallbackProxy && (error.response?.statusCode == 502 || error.response?.statusCode == 503 || error.response?.statusCode == 403)) {
+                setState(() => _triedFallbackProxy = true);
+                _loadHtml();
+              }
             },
           ),
-        )
-      ..loadHtmlString('''
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-          <style>
-            body { margin: 0; padding: 0; background-color: black; overflow: hidden; }
-            iframe { width: 100vw; height: 100vh; border: none; }
-          </style>
-        </head>
-        <body>
-          <iframe 
-            src="https://corsproxy.io/?${Uri.encodeComponent('https://www.youtube.com/embed/${widget.trailerKey}?autoplay=1&playsinline=1&origin=http://localhost')}" 
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
-            allowfullscreen>
-          </iframe>
-        </body>
-        </html>
-      ''', baseUrl: 'http://localhost/');
+        );
+      _loadHtml();
     } else {
       _ytController = YoutubePlayerController.fromVideoId(
         videoId: widget.trailerKey,
@@ -2883,6 +3841,33 @@ class _TrailerPlayerDialogState extends State<TrailerPlayerDialog> {
       );
       _isLoading = false;
     }
+  }
+
+  void _loadHtml() {
+    final youtubeUrl = 'https://www.youtube.com/embed/${widget.trailerKey}?autoplay=1&playsinline=1&origin=http://localhost';
+    final proxyUrl = _triedFallbackProxy 
+        ? 'https://cors-anywhere.com/$youtubeUrl' 
+        : 'https://corsproxy.io/?${Uri.encodeComponent(youtubeUrl)}';
+
+    _webController!.loadHtmlString('''
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <style>
+          body { margin: 0; padding: 0; background-color: black; overflow: hidden; }
+          iframe { width: 100vw; height: 100vh; border: none; }
+        </style>
+      </head>
+      <body>
+        <iframe 
+          src="$proxyUrl" 
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+          allowfullscreen>
+        </iframe>
+      </body>
+      </html>
+    ''', baseUrl: 'https://localhost:5000');
   }
 
   Future<void> _fallbackToExternal() async {
@@ -3057,7 +4042,11 @@ class _VideoPlayerPageState extends State<VideoPlayerPage> {
         progressSuffix = '&t=$pStr&progress=$pStr';
       }
 
-      _webViewController = WebViewController()
+      final PlatformWebViewControllerCreationParams params = defaultTargetPlatform == TargetPlatform.windows
+          ? WindowsWebViewControllerCreationParams()
+          : const PlatformWebViewControllerCreationParams();
+
+      _webViewController = WebViewController.fromPlatformCreationParams(params)
         ..setJavaScriptMode(JavaScriptMode.unrestricted)
         ..addJavaScriptChannel('FlutterControls', onMessageReceived: (message) {
           if (message.message == 'hover') {
