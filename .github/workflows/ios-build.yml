@@ -115,7 +115,6 @@ jobs:
         with:
           path: |
             ${{ steps.detect.outputs.ios_path }}/Pods
-            ~/.cocoapods/repos
           key: pods-${{ runner.os }}-${{ hashFiles(format('{0}/Podfile.lock', steps.detect.outputs.ios_path)) }}
           restore-keys: |
             pods-${{ runner.os }}-
@@ -166,8 +165,14 @@ jobs:
         run: |
           set -e
 
+          # Explicitly set SDKROOT to workaround a bug where it's not found for native asset builds.
+          export SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path)
+
           # Navigate to iOS project
           cd "$IOS_PATH"
+
+          # Update the local CocoaPods spec repo to prevent 404 errors on pod install
+          pod repo update
 
           # Find workspace or project
           WORKSPACE=$(find . -maxdepth 1 -name "*.xcworkspace" | head -1)

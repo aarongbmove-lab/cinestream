@@ -1,7 +1,7 @@
 {
     "tasks": [
         {
-            "type": "cppbuild",
+            "type": "process",
             "label": "C/C++: cl.exe build active file",
             "command": "cl.exe",
             "args": [
